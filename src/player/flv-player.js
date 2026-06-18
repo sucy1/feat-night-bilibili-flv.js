@@ -95,6 +95,12 @@ class FlvPlayer {
         this._recovering = false;
         this._recoverSeekTime = 0;
         this._preloadChecker = null;
+        this._preloadLastBufferEnd = 0;
+        this._preloadLastCheckTime = 0;
+        this._preloadLastCurrentTime = 0;
+        this._preloadConsumptionRate = 0;
+        this._preloadMinInterval = 50;
+        this._preloadMaxInterval = 500;
 
         let chromeNeedIDRFix = (Browser.chrome &&
                                (Browser.version.major < 50 ||
@@ -658,8 +664,19 @@ class FlvPlayer {
 
     _onvTimeUpdate(e) {
         let media = this._mediaElement;
-        this._lastCurrentTime = media.currentTime;
-        this._lastTimeUpdateTime = this._now();
+        let now = this._now();
+        let currentTime = media.currentTime;
+
+        if (this._recovering && this._preloadLastCheckTime > 0 && this._preloadLastCurrentTime > 0) {
+            let timeDelta = (now - this._preloadLastCheckTime) / 1000;
+            if (timeDelta > 0) {
+                let playDelta = currentTime - this._preloadLastCurrentTime;
+                this._preloadConsumptionRate = Math.max(0, playDelta / timeDelta);
+            }
+        }
+
+        this._lastCurrentTime = currentTime;
+        this._lastTimeUpdateTime = now;
 
         if (this._stalled && !media.paused && !media.seeking) {
             let buffered = media.buffered;
@@ -728,46 +745,113 @@ class FlvPlayer {
 
     _enablePreloadChecker() {
         if (this._preloadChecker == null) {
-            this._preloadChecker = window.setInterval(this._checkPreloadReady.bind(this), 200);
+            this._preloadLastBufferEnd = 0;
+            this._preloadLastCheckTime = 0;
+            this._preloadLastCurrentTime = this._mediaElement ? this._mediaElement.currentTime : 0;
+            this._preloadConsumptionRate = this._mediaElement && !this._mediaElement.paused ? this._mediaElement.playbackRate : 0;
+            this._schedulePreloadCheck(this._preloadMinInterval);
         }
     }
 
     _disablePreloadChecker() {
         if (this._preloadChecker != null) {
-            window.clearInterval(this._preloadChecker);
+            window.clearTimeout(this._preloadChecker);
             this._preloadChecker = null;
         }
     }
 
-    _checkPreloadReady() {
-        let media = this._mediaElement;
-        if (!this._recovering || !media || media.seeking) {
-            return;
-        }
+    _schedulePreloadCheck(interval) {
+        this._preloadChecker = window.setTimeout(this._checkPreloadReady.bind(this), interval);
+    }
 
+    _getCurrentBufferEnd() {
+        let media = this._mediaElement;
         let buffered = media.buffered;
         let seekTime = this._recoverSeekTime;
-        let preloadDuration = this._config.preloadRecoverDuration;
-        let bufferedEnough = false;
+        let maxBufferEnd = 0;
 
         if (buffered.length > 0) {
             for (let i = 0; i < buffered.length; i++) {
+                let start = buffered.start(i);
                 let end = buffered.end(i);
-                if (end >= seekTime + preloadDuration) {
-                    bufferedEnough = true;
+                if (start <= seekTime && end > seekTime) {
+                    maxBufferEnd = end;
+                    for (let j = i + 1; j < buffered.length; j++) {
+                        let nextStart = buffered.start(j);
+                        let nextEnd = buffered.end(j);
+                        if (nextStart <= maxBufferEnd + 0.5) {
+                            maxBufferEnd = nextEnd;
+                        } else {
+                            break;
+                        }
+                    }
                     break;
                 }
             }
         }
 
-        if (bufferedEnough) {
+        return maxBufferEnd;
+    }
+
+    _checkPreloadReady() {
+        let media = this._mediaElement;
+        if (!this._recovering || !media || media.seeking) {
+            this._preloadChecker = null;
+            return;
+        }
+
+        let now = this._now();
+        let seekTime = this._recoverSeekTime;
+        let preloadDuration = this._config.preloadRecoverDuration;
+        let targetBufferEnd = seekTime + preloadDuration;
+        let currentBufferEnd = this._getCurrentBufferEnd();
+
+        if (currentBufferEnd >= targetBufferEnd) {
             Log.w(this.TAG, `Preload complete, ${preloadDuration}s buffered, resuming playback at ${seekTime.toFixed(3)}s`);
             this._disablePreloadChecker();
             this._recovering = false;
             this._requestSetTime = true;
             media.currentTime = seekTime;
             media.play().catch(() => {});
+            return;
         }
+
+        let nextInterval = this._preloadMaxInterval;
+
+        if (this._preloadLastCheckTime > 0 && this._preloadLastBufferEnd > 0) {
+            let timeDelta = (now - this._preloadLastCheckTime) / 1000;
+            let bufferDelta = currentBufferEnd - this._preloadLastBufferEnd;
+            let remainingBuffer = targetBufferEnd - currentBufferEnd;
+
+            if (timeDelta > 0) {
+                let bufferGrowthRate = bufferDelta > 0 ? bufferDelta / timeDelta : 0;
+                let consumptionRate = this._preloadConsumptionRate > 0 ? this._preloadConsumptionRate : (media.paused ? 0 : media.playbackRate);
+                let netGrowthRate = bufferGrowthRate - consumptionRate;
+
+                if (netGrowthRate > 0 && remainingBuffer > 0) {
+                    let estimatedTimeSeconds = remainingBuffer / netGrowthRate;
+                    let estimatedTimeMs = estimatedTimeSeconds * 1000;
+                    nextInterval = Math.max(
+                        this._preloadMinInterval,
+                        Math.min(this._preloadMaxInterval, estimatedTimeMs / 2)
+                    );
+                } else if (netGrowthRate <= 0) {
+                    nextInterval = this._preloadMinInterval;
+                } else {
+                    let progressRatio = Math.max(0, Math.min(1, (currentBufferEnd - seekTime) / preloadDuration));
+                    nextInterval = Math.max(
+                        this._preloadMinInterval,
+                        this._preloadMaxInterval * (1 - progressRatio * 0.7)
+                    );
+                }
+            }
+        }
+
+        this._preloadLastBufferEnd = currentBufferEnd;
+        this._preloadLastCheckTime = now;
+        this._preloadLastCurrentTime = media.currentTime;
+
+        this._schedulePreloadCheck(nextInterval);
     }
 
     _checkPlaybackStall() {
