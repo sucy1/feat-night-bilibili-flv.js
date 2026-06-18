@@ -58,6 +58,7 @@ let TransmuxingWorker = function (self) {
                 controller.on(TransmuxingEvents.SCRIPTDATA_ARRIVED, onScriptDataArrived.bind(this));
                 controller.on(TransmuxingEvents.STATISTICS_INFO, onStatisticsInfo.bind(this));
                 controller.on(TransmuxingEvents.RECOMMEND_SEEKPOINT, onRecommendSeekpoint.bind(this));
+                controller.on(TransmuxingEvents.BUFFER_STATUS, onBufferStatus.bind(this));
                 break;
             case 'destroy':
                 if (controller) {
@@ -81,6 +82,14 @@ let TransmuxingWorker = function (self) {
             case 'resume':
                 controller.resume();
                 break;
+            case 'get_buffer_status': {
+                let status = controller ? controller.bufferStatus : { startDts: null, endDts: null };
+                self.postMessage({
+                    msg: 'get_buffer_status_response',
+                    data: status
+                });
+                break;
+            }
             case 'logging_config': {
                 let config = e.data.param;
                 LoggingControl.applyConfig(config);
@@ -187,6 +196,13 @@ let TransmuxingWorker = function (self) {
         self.postMessage({
             msg: TransmuxingEvents.RECOMMEND_SEEKPOINT,
             data: milliseconds
+        });
+    }
+
+    function onBufferStatus(status) {
+        self.postMessage({
+            msg: TransmuxingEvents.BUFFER_STATUS,
+            data: status
         });
     }
 

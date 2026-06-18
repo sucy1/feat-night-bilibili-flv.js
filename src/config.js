@@ -46,7 +46,10 @@ export const defaultConfig = {
     // referrerPolicy: leave as unspecified
 
     headers: undefined,
-    customLoader: undefined
+    customLoader: undefined,
+
+    stallTimeout: 5000,
+    maxStallRetries: 5
 };
 
 export function createDefaultConfig() {

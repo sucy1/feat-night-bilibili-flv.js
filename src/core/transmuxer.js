@@ -30,6 +30,8 @@ class Transmuxer {
     constructor(mediaDataSource, config) {
         this.TAG = 'Transmuxer';
         this._emitter = new EventEmitter();
+        this._bufferStatusCache = { startDts: null, endDts: null };
+        this._workerBufferStatusCallbacks = [];
 
         if (config.enableWorker && typeof (Worker) !== 'undefined') {
             try {
@@ -64,6 +66,7 @@ class Transmuxer {
             ctl.on(TransmuxingEvents.SCRIPTDATA_ARRIVED, this._onScriptDataArrived.bind(this));
             ctl.on(TransmuxingEvents.STATISTICS_INFO, this._onStatisticsInfo.bind(this));
             ctl.on(TransmuxingEvents.RECOMMEND_SEEKPOINT, this._onRecommendSeekpoint.bind(this));
+            ctl.on(TransmuxingEvents.BUFFER_STATUS, this._onBufferStatus.bind(this));
         }
     }
 
@@ -133,6 +136,20 @@ class Transmuxer {
         } else {
             this._controller.resume();
         }
+    }
+
+    get bufferStatus() {
+        if (this._controller) {
+            return this._controller.bufferStatus;
+        }
+        return Object.assign({}, this._bufferStatusCache);
+    }
+
+    _onBufferStatus(status) {
+        this._bufferStatusCache = Object.assign({}, status);
+        Promise.resolve().then(() => {
+            this._emitter.emit(TransmuxingEvents.BUFFER_STATUS, status);
+        });
     }
 
     _onInitSegment(type, initSegment) {
@@ -243,6 +260,16 @@ class Transmuxer {
                 break;
             case TransmuxingEvents.RECOMMEND_SEEKPOINT:
                 this._emitter.emit(message.msg, data);
+                break;
+            case TransmuxingEvents.BUFFER_STATUS:
+                this._bufferStatusCache = Object.assign({}, data);
+                this._emitter.emit(message.msg, data);
+                break;
+            case 'get_buffer_status_response':
+                while (this._workerBufferStatusCallbacks.length > 0) {
+                    let callback = this._workerBufferStatusCallbacks.shift();
+                    callback(data);
+                }
                 break;
             case 'logcat_callback':
                 Log.emitter.emit('log', data.type, data.logcat);

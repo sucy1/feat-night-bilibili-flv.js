@@ -53,7 +53,10 @@ class FlvPlayer {
             onvSeeking: this._onvSeeking.bind(this),
             onvCanPlay: this._onvCanPlay.bind(this),
             onvStalled: this._onvStalled.bind(this),
-            onvProgress: this._onvProgress.bind(this)
+            onvProgress: this._onvProgress.bind(this),
+            onvTimeUpdate: this._onvTimeUpdate.bind(this),
+            onvWaiting: this._onvWaiting.bind(this),
+            onvPlaying: this._onvPlaying.bind(this)
         };
 
         if (self.performance && self.performance.now) {
@@ -79,6 +82,14 @@ class FlvPlayer {
         this._mediaInfo = null;
         this._statisticsInfo = null;
 
+        this._stalled = false;
+        this._stallBeginTime = 0;
+        this._stallRetryCount = 0;
+        this._lastCurrentTime = 0;
+        this._lastTimeUpdateTime = 0;
+        this._stallChecker = null;
+        this._bufferStatus = null;
+
         let chromeNeedIDRFix = (Browser.chrome &&
                                (Browser.version.major < 50 ||
                                (Browser.version.major === 50 && Browser.version.build < 2661)));
@@ -93,6 +104,10 @@ class FlvPlayer {
         if (this._progressChecker != null) {
             window.clearInterval(this._progressChecker);
             this._progressChecker = null;
+        }
+        if (this._stallChecker != null) {
+            window.clearInterval(this._stallChecker);
+            this._stallChecker = null;
         }
         if (this._transmuxer) {
             this.unload();
@@ -135,6 +150,9 @@ class FlvPlayer {
         mediaElement.addEventListener('canplay', this.e.onvCanPlay);
         mediaElement.addEventListener('stalled', this.e.onvStalled);
         mediaElement.addEventListener('progress', this.e.onvProgress);
+        mediaElement.addEventListener('timeupdate', this.e.onvTimeUpdate);
+        mediaElement.addEventListener('waiting', this.e.onvWaiting);
+        mediaElement.addEventListener('playing', this.e.onvPlaying);
 
         this._msectl = new MSEController(this._config);
 
@@ -176,6 +194,9 @@ class FlvPlayer {
             this._mediaElement.removeEventListener('canplay', this.e.onvCanPlay);
             this._mediaElement.removeEventListener('stalled', this.e.onvStalled);
             this._mediaElement.removeEventListener('progress', this.e.onvProgress);
+            this._mediaElement.removeEventListener('timeupdate', this.e.onvTimeUpdate);
+            this._mediaElement.removeEventListener('waiting', this.e.onvWaiting);
+            this._mediaElement.removeEventListener('playing', this.e.onvPlaying);
             this._mediaElement = null;
         }
         if (this._msectl) {
@@ -258,6 +279,12 @@ class FlvPlayer {
                 this._mediaElement.currentTime = milliseconds / 1000;
             }
         });
+        this._transmuxer.on(TransmuxingEvents.BUFFER_STATUS, (status) => {
+            this._bufferStatus = status;
+        });
+
+        this._resetStallState();
+        this._enableStallChecker();
 
         this._transmuxer.open();
     }
@@ -266,6 +293,8 @@ class FlvPlayer {
         if (this._mediaElement) {
             this._mediaElement.pause();
         }
+        this._disableStallChecker();
+        this._resetStallState();
         if (this._msectl) {
             this._msectl.seek(0);
         }
@@ -274,6 +303,7 @@ class FlvPlayer {
             this._transmuxer.destroy();
             this._transmuxer = null;
         }
+        this._bufferStatus = null;
     }
 
     play() {
@@ -337,6 +367,16 @@ class FlvPlayer {
         }
         this._statisticsInfo = this._fillStatisticsInfo(this._statisticsInfo);
         return Object.assign({}, this._statisticsInfo);
+    }
+
+    get bufferStatus() {
+        if (this._transmuxer) {
+            return this._transmuxer.bufferStatus;
+        }
+        return {
+            startDts: null,
+            endDts: null
+        };
     }
 
     _fillStatisticsInfo(statInfo) {
@@ -603,6 +643,163 @@ class FlvPlayer {
 
     _onvProgress(e) {
         this._checkAndResumeStuckPlayback();
+    }
+
+    _onvTimeUpdate(e) {
+        let media = this._mediaElement;
+        this._lastCurrentTime = media.currentTime;
+        this._lastTimeUpdateTime = this._now();
+
+        if (this._stalled && !media.paused && !media.seeking) {
+            let buffered = media.buffered;
+            if (buffered.length > 0) {
+                let currentTime = media.currentTime;
+                for (let i = 0; i < buffered.length; i++) {
+                    let start = buffered.start(i);
+                    let end = buffered.end(i);
+                    if (currentTime >= start && currentTime < end - 0.1) {
+                        this._recoverFromStall();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    _onvWaiting(e) {
+        if (!this._stalled) {
+            this._stallBeginTime = this._now();
+        }
+    }
+
+    _onvPlaying(e) {
+        if (this._stalled) {
+            this._recoverFromStall();
+        }
+    }
+
+    _resetStallState() {
+        this._stalled = false;
+        this._stallBeginTime = 0;
+        this._stallRetryCount = 0;
+        this._lastCurrentTime = 0;
+        this._lastTimeUpdateTime = 0;
+    }
+
+    _enableStallChecker() {
+        if (this._stallChecker == null && this._config.stallTimeout > 0) {
+            this._stallChecker = window.setInterval(this._checkPlaybackStall.bind(this), 500);
+        }
+    }
+
+    _disableStallChecker() {
+        if (this._stallChecker != null) {
+            window.clearInterval(this._stallChecker);
+            this._stallChecker = null;
+        }
+    }
+
+    _checkPlaybackStall() {
+        let media = this._mediaElement;
+        if (!media || media.paused || media.ended || media.seeking) {
+            return;
+        }
+
+        let now = this._now();
+        let currentTime = media.currentTime;
+        let buffered = media.buffered;
+        let playbackStalled = false;
+
+        if (this._lastTimeUpdateTime > 0) {
+            let timeSinceLastUpdate = now - this._lastTimeUpdateTime;
+            if (timeSinceLastUpdate >= this._config.stallTimeout &&
+                Math.abs(currentTime - this._lastCurrentTime) < 0.01) {
+                playbackStalled = true;
+            }
+        }
+
+        let reachedBufferEnd = false;
+        if (buffered.length > 0) {
+            for (let i = 0; i < buffered.length; i++) {
+                let start = buffered.start(i);
+                let end = buffered.end(i);
+                if (currentTime >= start && currentTime < end) {
+                    if (end - currentTime < 0.1) {
+                        reachedBufferEnd = true;
+                    }
+                    break;
+                }
+                if (i === buffered.length - 1 && currentTime >= end) {
+                    reachedBufferEnd = true;
+                }
+            }
+        } else {
+            reachedBufferEnd = true;
+        }
+
+        if (playbackStalled && reachedBufferEnd) {
+            if (!this._stalled) {
+                this._stalled = true;
+                this._stallBeginTime = now;
+                Log.w(this.TAG, `Playback stalled at ${currentTime.toFixed(3)}s`);
+                this._emitter.emit(PlayerEvents.STALLED, {
+                    currentTime: currentTime,
+                    bufferEnd: this._bufferStatus ? this._bufferStatus.endDts / 1000 : null
+                });
+            }
+            this._tryRecoverFromStall();
+        }
+    }
+
+    _tryRecoverFromStall() {
+        if (this._stallRetryCount >= this._config.maxStallRetries) {
+            Log.w(this.TAG, `Max stall retries (${this._config.maxStallRetries}) reached, giving up`);
+            return;
+        }
+
+        let media = this._mediaElement;
+        let currentTime = media.currentTime;
+        let buffered = media.buffered;
+
+        let targetSeekTime = null;
+        if (this._bufferStatus && this._bufferStatus.endDts != null) {
+            let bufferEndTime = this._bufferStatus.endDts / 1000;
+            if (bufferEndTime > currentTime + 0.1) {
+                targetSeekTime = bufferEndTime - 0.1;
+            }
+        }
+
+        if (targetSeekTime == null && buffered.length > 0) {
+            for (let i = 0; i < buffered.length; i++) {
+                let end = buffered.end(i);
+                if (end > currentTime + 0.1) {
+                    targetSeekTime = end - 0.1;
+                    break;
+                }
+            }
+        }
+
+        if (targetSeekTime != null) {
+            this._stallRetryCount++;
+            Log.w(this.TAG, `Stall recovery attempt #${this._stallRetryCount}: seek from ${currentTime.toFixed(3)}s to ${targetSeekTime.toFixed(3)}s`);
+            this._requestSetTime = true;
+            media.currentTime = targetSeekTime;
+            media.play().catch(() => {});
+        }
+    }
+
+    _recoverFromStall() {
+        let media = this._mediaElement;
+        let currentTime = media.currentTime;
+        let stalledDuration = (this._now() - this._stallBeginTime) / 1000;
+        Log.w(this.TAG, `Playback recovered at ${currentTime.toFixed(3)}s, stalled for ${stalledDuration.toFixed(3)}s after ${this._stallRetryCount} retries`);
+        this._emitter.emit(PlayerEvents.RECOVERED, {
+            currentTime: currentTime,
+            stalledDuration: stalledDuration,
+            retryCount: this._stallRetryCount
+        });
+        this._stalled = false;
+        this._stallRetryCount = 0;
     }
 
 }

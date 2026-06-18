@@ -83,6 +83,9 @@ class TransmuxingController {
         this._pendingResolveSeekPoint = null;
 
         this._statisticsReporter = null;
+
+        this._bufferStartDts = null;
+        this._bufferEndDts = null;
     }
 
     destroy() {
@@ -168,10 +171,21 @@ class TransmuxingController {
         }
     }
 
+    get bufferStatus() {
+        return {
+            startDts: this._bufferStartDts,
+            endDts: this._bufferEndDts
+        };
+    }
+
     seek(milliseconds) {
         if (this._mediaInfo == null || !this._mediaInfo.isSeekable()) {
             return;
         }
+
+        // Reset buffer status on seek
+        this._bufferStartDts = null;
+        this._bufferEndDts = null;
 
         let targetSegmentIndex = this._searchSegmentIndexContains(milliseconds);
 
@@ -373,6 +387,21 @@ class TransmuxingController {
             return;
         }
         this._emitter.emit(TransmuxingEvents.MEDIA_SEGMENT, type, mediaSegment);
+
+        // Update buffer status
+        let info = mediaSegment.info;
+        if (info) {
+            if (this._bufferStartDts == null || info.dts < this._bufferStartDts) {
+                this._bufferStartDts = info.dts;
+            }
+            if (this._bufferEndDts == null || info.endDts > this._bufferEndDts) {
+                this._bufferEndDts = info.endDts;
+            }
+            this._emitter.emit(TransmuxingEvents.BUFFER_STATUS, {
+                startDts: this._bufferStartDts,
+                endDts: this._bufferEndDts
+            });
+        }
 
         // Resolve pending seekPoint
         if (this._pendingResolveSeekPoint != null && type === 'video') {

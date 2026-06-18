@@ -165,6 +165,17 @@ declare namespace FlvJs {
          * @desc Should implement `BaseLoader` interface
          */
         customLoader?: CustomLoaderConstructor;
+        /**
+         * @desc Maximum timeout in milliseconds for detecting playback stall.
+         *          Set to 0 to disable stall detection.
+         * @defaultvalue 5000
+         */
+        stallTimeout?: number;
+        /**
+         * @desc Maximum number of stall recovery retries before giving up.
+         * @defaultvalue 5
+         */
+        maxStallRetries?: number;
     }
 
     interface CustomSeekHandlerConstructor {
@@ -324,6 +335,7 @@ declare namespace FlvJs {
     interface FlvPlayer extends Player {
         mediaInfo: FlvPlayerMediaInfo;
         statisticsInfo: FlvPlayerStatisticsInfo;
+        bufferStatus: BufferStatus;
     }
 
     interface NativePlayer extends Player {
@@ -357,6 +369,24 @@ declare namespace FlvJs {
         METADATA_ARRIVED: string;
         SCRIPTDATA_ARRIVED: string;
         STATISTICS_INFO: string;
+        STALLED: string;
+        RECOVERED: string;
+    }
+
+    interface BufferStatus {
+        startDts: number | null;
+        endDts: number | null;
+    }
+
+    interface StalledEventData {
+        currentTime: number;
+        bufferEnd: number | null;
+    }
+
+    interface RecoveredEventData {
+        currentTime: number;
+        stalledDuration: number;
+        retryCount: number;
     }
 
     interface ErrorTypes {

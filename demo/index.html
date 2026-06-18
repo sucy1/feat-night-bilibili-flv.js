@@ -26,6 +26,14 @@
                     <label for="hasAudio">hasAudio</label>
                     <input type="checkbox" id="hasVideo" onchange="saveSettings()" checked />
                     <label for="hasVideo">hasVideo</label>
+                    <input type="checkbox" id="enableStallDetect" onchange="saveSettings()" checked />
+                    <label for="enableStallDetect">Stall Detection</label>
+                </div>
+                <div class="options stall-options">
+                    <label for="stallTimeout">Stall Timeout(ms):</label>
+                    <input type="number" id="stallTimeout" value="5000" min="0" step="500" style="width:100px" onchange="saveSettings()" />
+                    <label for="maxStallRetries">Max Retries:</label>
+                    <input type="number" id="maxStallRetries" value="5" min="0" step="1" style="width:60px" onchange="saveSettings()" />
                 </div>
             </div>
             <div id="mediaSourceURL" class="hidden">
@@ -52,13 +60,21 @@
             <button onclick="flv_seekto()">SeekTo</button>
         </div>
         <textarea name="logcatbox" class="logcatBox" rows="10" readonly></textarea>
+        <textarea name="eventBox" class="logcatBox" rows="5" readonly placeholder="Stall events will appear here..."></textarea>
     </div>
 
     <script src="../dist/flv.js"></script>
     
     <script>
-        var checkBoxFields = ['isLive', 'withCredentials', 'hasAudio', 'hasVideo'];
+        var checkBoxFields = ['isLive', 'withCredentials', 'hasAudio', 'hasVideo', 'enableStallDetect'];
+        var numberFields = ['stallTimeout', 'maxStallRetries'];
         var streamURL, mediaSourceURL;
+
+        function appendEvent(str) {
+            var eventBox = document.getElementsByName('eventBox')[0];
+            var time = new Date().toLocaleTimeString();
+            eventBox.value = '[' + time + '] ' + str + '\n' + eventBox.value;
+        }
 
         function flv_load() {
             console.log('isSupported: ' + flvjs.isSupported());
@@ -103,8 +119,21 @@
                 enableWorker: false,
                 lazyLoadMaxDuration: 3 * 60,
                 seekType: 'range',
+                stallTimeout: document.getElementById('enableStallDetect').checked ? parseInt(document.getElementById('stallTimeout').value) : 0,
+                maxStallRetries: parseInt(document.getElementById('maxStallRetries').value)
             });
             player.attachMediaElement(element);
+
+            player.on(flvjs.Events.STALLED, function(data) {
+                appendEvent('STALLED at ' + data.currentTime.toFixed(3) + 's, bufferEnd: ' + (data.bufferEnd != null ? data.bufferEnd.toFixed(3) + 's' : 'N/A'));
+            });
+            player.on(flvjs.Events.RECOVERED, function(data) {
+                appendEvent('RECOVERED at ' + data.currentTime.toFixed(3) + 's, stalled for ' + data.stalledDuration.toFixed(3) + 's, retries: ' + data.retryCount);
+            });
+            player.on(flvjs.Events.ERROR, function(errType, errDetail, errInfo) {
+                appendEvent('ERROR: ' + errType + ' - ' + errDetail);
+            });
+
             player.load();
         }
 
@@ -171,6 +200,11 @@
                 var checkbox = document.getElementById(field);
                 ls_set(field, checkbox.checked ? '1' : '0');
             }
+            for (i = 0; i < numberFields.length; i++) {
+                var numField = numberFields[i];
+                var numberInput = document.getElementById(numField);
+                ls_set(numField, numberInput.value);
+            }
             var msURL = document.getElementById('msURL');
             var sURL = document.getElementById('sURL');
             ls_set('msURL', msURL.value);
@@ -186,6 +220,11 @@
                 var checkbox = document.getElementById(field);
                 var c = ls_get(field, checkbox.checked ? '1' : '0');
                 checkbox.checked = c === '1' ? true : false;
+            }
+            for (i = 0; i < numberFields.length; i++) {
+                var numField = numberFields[i];
+                var numberInput = document.getElementById(numField);
+                numberInput.value = ls_get(numField, numberInput.value);
             }
 
             var msURL = document.getElementById('msURL');
