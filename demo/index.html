@@ -28,12 +28,16 @@
                     <label for="hasVideo">hasVideo</label>
                     <input type="checkbox" id="enableStallDetect" onchange="saveSettings()" checked />
                     <label for="enableStallDetect">Stall Detection</label>
+                    <input type="checkbox" id="usePlaybackWaitEvent" onchange="saveSettings()" checked />
+                    <label for="usePlaybackWaitEvent">Use waiting event</label>
                 </div>
                 <div class="options stall-options">
                     <label for="stallTimeout">Stall Timeout(ms):</label>
                     <input type="number" id="stallTimeout" value="5000" min="0" step="500" style="width:100px" onchange="saveSettings()" />
                     <label for="maxStallRetries">Max Retries:</label>
                     <input type="number" id="maxStallRetries" value="5" min="0" step="1" style="width:60px" onchange="saveSettings()" />
+                    <label for="preloadRecoverDuration">Preload(s):</label>
+                    <input type="number" id="preloadRecoverDuration" value="2.0" min="0" step="0.5" style="width:60px" onchange="saveSettings()" />
                 </div>
             </div>
             <div id="mediaSourceURL" class="hidden">
@@ -66,8 +70,8 @@
     <script src="../dist/flv.js"></script>
     
     <script>
-        var checkBoxFields = ['isLive', 'withCredentials', 'hasAudio', 'hasVideo', 'enableStallDetect'];
-        var numberFields = ['stallTimeout', 'maxStallRetries'];
+        var checkBoxFields = ['isLive', 'withCredentials', 'hasAudio', 'hasVideo', 'enableStallDetect', 'usePlaybackWaitEvent'];
+        var numberFields = ['stallTimeout', 'maxStallRetries', 'preloadRecoverDuration'];
         var streamURL, mediaSourceURL;
 
         function appendEvent(str) {
@@ -120,12 +124,14 @@
                 lazyLoadMaxDuration: 3 * 60,
                 seekType: 'range',
                 stallTimeout: document.getElementById('enableStallDetect').checked ? parseInt(document.getElementById('stallTimeout').value) : 0,
-                maxStallRetries: parseInt(document.getElementById('maxStallRetries').value)
+                maxStallRetries: parseInt(document.getElementById('maxStallRetries').value),
+                preloadRecoverDuration: parseFloat(document.getElementById('preloadRecoverDuration').value),
+                usePlaybackWaitEvent: document.getElementById('usePlaybackWaitEvent').checked
             });
             player.attachMediaElement(element);
 
             player.on(flvjs.Events.STALLED, function(data) {
-                appendEvent('STALLED at ' + data.currentTime.toFixed(3) + 's, bufferEnd: ' + (data.bufferEnd != null ? data.bufferEnd.toFixed(3) + 's' : 'N/A'));
+                appendEvent('STALLED (' + data.type + ') at ' + data.currentTime.toFixed(3) + 's, bufferEnd: ' + (data.bufferEnd != null ? data.bufferEnd.toFixed(3) + 's' : 'N/A'));
             });
             player.on(flvjs.Events.RECOVERED, function(data) {
                 appendEvent('RECOVERED at ' + data.currentTime.toFixed(3) + 's, stalled for ' + data.stalledDuration.toFixed(3) + 's, retries: ' + data.retryCount);

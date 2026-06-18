@@ -90,6 +90,12 @@ class FlvPlayer {
         this._stallChecker = null;
         this._bufferStatus = null;
 
+        this._waiting = false;
+        this._waitingBeginTime = 0;
+        this._recovering = false;
+        this._recoverSeekTime = 0;
+        this._preloadChecker = null;
+
         let chromeNeedIDRFix = (Browser.chrome &&
                                (Browser.version.major < 50 ||
                                (Browser.version.major === 50 && Browser.version.build < 2661)));
@@ -108,6 +114,10 @@ class FlvPlayer {
         if (this._stallChecker != null) {
             window.clearInterval(this._stallChecker);
             this._stallChecker = null;
+        }
+        if (this._preloadChecker != null) {
+            window.clearInterval(this._preloadChecker);
+            this._preloadChecker = null;
         }
         if (this._transmuxer) {
             this.unload();
@@ -294,6 +304,7 @@ class FlvPlayer {
             this._mediaElement.pause();
         }
         this._disableStallChecker();
+        this._disablePreloadChecker();
         this._resetStallState();
         if (this._msectl) {
             this._msectl.seek(0);
@@ -664,15 +675,27 @@ class FlvPlayer {
                 }
             }
         }
+
+        if (this._waiting && !media.paused && !media.seeking) {
+            this._waiting = false;
+            this._waitingBeginTime = 0;
+        }
     }
 
     _onvWaiting(e) {
-        if (!this._stalled) {
-            this._stallBeginTime = this._now();
+        if (!this._stalled && !this._recovering) {
+            this._waiting = true;
+            this._waitingBeginTime = this._now();
+            Log.v(this.TAG, 'Playback waiting for data');
         }
     }
 
     _onvPlaying(e) {
+        if (this._recovering) {
+            return;
+        }
+        this._waiting = false;
+        this._waitingBeginTime = 0;
         if (this._stalled) {
             this._recoverFromStall();
         }
@@ -684,6 +707,10 @@ class FlvPlayer {
         this._stallRetryCount = 0;
         this._lastCurrentTime = 0;
         this._lastTimeUpdateTime = 0;
+        this._waiting = false;
+        this._waitingBeginTime = 0;
+        this._recovering = false;
+        this._recoverSeekTime = 0;
     }
 
     _enableStallChecker() {
@@ -699,9 +726,53 @@ class FlvPlayer {
         }
     }
 
+    _enablePreloadChecker() {
+        if (this._preloadChecker == null) {
+            this._preloadChecker = window.setInterval(this._checkPreloadReady.bind(this), 200);
+        }
+    }
+
+    _disablePreloadChecker() {
+        if (this._preloadChecker != null) {
+            window.clearInterval(this._preloadChecker);
+            this._preloadChecker = null;
+        }
+    }
+
+    _checkPreloadReady() {
+        let media = this._mediaElement;
+        if (!this._recovering || !media || media.seeking) {
+            return;
+        }
+
+        let buffered = media.buffered;
+        let seekTime = this._recoverSeekTime;
+        let preloadDuration = this._config.preloadRecoverDuration;
+        let bufferedEnough = false;
+
+        if (buffered.length > 0) {
+            for (let i = 0; i < buffered.length; i++) {
+                let end = buffered.end(i);
+                if (end >= seekTime + preloadDuration) {
+                    bufferedEnough = true;
+                    break;
+                }
+            }
+        }
+
+        if (bufferedEnough) {
+            Log.w(this.TAG, `Preload complete, ${preloadDuration}s buffered, resuming playback at ${seekTime.toFixed(3)}s`);
+            this._disablePreloadChecker();
+            this._recovering = false;
+            this._requestSetTime = true;
+            media.currentTime = seekTime;
+            media.play().catch(() => {});
+        }
+    }
+
     _checkPlaybackStall() {
         let media = this._mediaElement;
-        if (!media || media.paused || media.ended || media.seeking) {
+        if (!media || media.paused || media.ended || media.seeking || this._recovering) {
             return;
         }
 
@@ -710,12 +781,23 @@ class FlvPlayer {
         let buffered = media.buffered;
         let playbackStalled = false;
 
-        if (this._lastTimeUpdateTime > 0) {
-            let timeSinceLastUpdate = now - this._lastTimeUpdateTime;
-            if (timeSinceLastUpdate >= this._config.stallTimeout &&
-                Math.abs(currentTime - this._lastCurrentTime) < 0.01) {
-                playbackStalled = true;
+        let timeSinceLastUpdate = now - this._lastTimeUpdateTime;
+        if (this._lastTimeUpdateTime > 0 &&
+            timeSinceLastUpdate >= this._config.stallTimeout &&
+            Math.abs(currentTime - this._lastCurrentTime) < 0.01) {
+            playbackStalled = true;
+        }
+
+        let waitingStalled = false;
+        if (this._config.usePlaybackWaitEvent && this._waiting && this._waitingBeginTime > 0) {
+            let waitingDuration = now - this._waitingBeginTime;
+            if (waitingDuration >= this._config.stallTimeout) {
+                waitingStalled = true;
             }
+        }
+
+        if (!playbackStalled && !waitingStalled) {
+            return;
         }
 
         let reachedBufferEnd = false;
@@ -737,14 +819,16 @@ class FlvPlayer {
             reachedBufferEnd = true;
         }
 
-        if (playbackStalled && reachedBufferEnd) {
+        if ((playbackStalled || waitingStalled) && reachedBufferEnd) {
             if (!this._stalled) {
                 this._stalled = true;
                 this._stallBeginTime = now;
-                Log.w(this.TAG, `Playback stalled at ${currentTime.toFixed(3)}s`);
+                let stallType = playbackStalled ? 'timeout' : 'waiting';
+                Log.w(this.TAG, `Playback stalled at ${currentTime.toFixed(3)}s (detected by ${stallType})`);
                 this._emitter.emit(PlayerEvents.STALLED, {
                     currentTime: currentTime,
-                    bufferEnd: this._bufferStatus ? this._bufferStatus.endDts / 1000 : null
+                    bufferEnd: this._bufferStatus ? this._bufferStatus.endDts / 1000 : null,
+                    type: stallType
                 });
             }
             this._tryRecoverFromStall();
@@ -752,6 +836,9 @@ class FlvPlayer {
     }
 
     _tryRecoverFromStall() {
+        if (this._recovering) {
+            return;
+        }
         if (this._stallRetryCount >= this._config.maxStallRetries) {
             Log.w(this.TAG, `Max stall retries (${this._config.maxStallRetries}) reached, giving up`);
             return;
@@ -781,10 +868,23 @@ class FlvPlayer {
 
         if (targetSeekTime != null) {
             this._stallRetryCount++;
-            Log.w(this.TAG, `Stall recovery attempt #${this._stallRetryCount}: seek from ${currentTime.toFixed(3)}s to ${targetSeekTime.toFixed(3)}s`);
+            this._recovering = true;
+            this._recoverSeekTime = targetSeekTime;
+            Log.w(this.TAG, `Stall recovery attempt #${this._stallRetryCount}: seek to ${targetSeekTime.toFixed(3)}s and preload ${this._config.preloadRecoverDuration}s`);
+
+            media.pause();
             this._requestSetTime = true;
             media.currentTime = targetSeekTime;
-            media.play().catch(() => {});
+
+            this._waiting = false;
+            this._waitingBeginTime = 0;
+
+            if (this._config.preloadRecoverDuration > 0) {
+                this._enablePreloadChecker();
+            } else {
+                this._recovering = false;
+                media.play().catch(() => {});
+            }
         }
     }
 

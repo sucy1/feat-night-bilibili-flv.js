@@ -49,8 +49,13 @@ let config = {
         rules: [
             {
                 test: /\.(ts|js)$/,
-                use: 'ts-loader',
-                exclude: /node-modules/
+                use: {
+                    loader: 'ts-loader',
+                    options: {
+                        transpileOnly: true
+                    }
+                },
+                exclude: /node_modules/
             },
             {
                 enforce: 'pre',

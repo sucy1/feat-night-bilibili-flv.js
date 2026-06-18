@@ -49,7 +49,9 @@ export const defaultConfig = {
     customLoader: undefined,
 
     stallTimeout: 5000,
-    maxStallRetries: 5
+    maxStallRetries: 5,
+    preloadRecoverDuration: 2.0,
+    usePlaybackWaitEvent: true
 };
 
 export function createDefaultConfig() {

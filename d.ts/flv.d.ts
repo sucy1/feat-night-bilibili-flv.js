@@ -176,6 +176,19 @@ declare namespace FlvJs {
          * @defaultvalue 5
          */
         maxStallRetries?: number;
+        /**
+         * @desc Duration in seconds to preload after a stall recovery seek before
+         *          resuming playback. Helps prevent repeated stalls on unstable networks.
+         *          Set to 0 to resume playback immediately.
+         * @defaultvalue 2.0
+         */
+        preloadRecoverDuration?: number;
+        /**
+         * @desc Use HTMLMediaElement 'waiting' event in conjunction with timeupdate polling
+         *          for more reliable stall detection.
+         * @defaultvalue true
+         */
+        usePlaybackWaitEvent?: boolean;
     }
 
     interface CustomSeekHandlerConstructor {
@@ -381,6 +394,12 @@ declare namespace FlvJs {
     interface StalledEventData {
         currentTime: number;
         bufferEnd: number | null;
+        /**
+         * @desc The detection method that triggered the stall event.
+         *          'timeout' - detected by timeupdate polling timeout
+         *          'waiting' - detected by 'waiting' event timeout
+         */
+        type: 'timeout' | 'waiting';
     }
 
     interface RecoveredEventData {
